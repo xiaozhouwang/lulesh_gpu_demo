@@ -193,15 +193,20 @@ static bool g_cmdline_opts_set = false;
 struct LogConfig {
   bool enabled;
   bool log_pre;
+  bool log_substeps;
   Index_t max_cycle;
+  Index_t cycle_stride;
   Index_t stride;
   std::string root;
   std::set<std::string> fields;
+  std::set<Index_t> cycle_list;
 
   LogConfig()
       : enabled(false),
         log_pre(false),
+        log_substeps(false),
         max_cycle(1),
+        cycle_stride(1),
         stride(1),
         root(lulesh_log::DefaultLogRoot())
   {
@@ -263,6 +268,40 @@ static std::string TrimCopy(const std::string& input)
   return result;
 }
 
+static std::set<Index_t> ParseCycleList(const char* name)
+{
+  std::set<Index_t> cycles;
+  const char* value = getenv(name);
+  if (value == NULL || value[0] == '\0') {
+    return cycles;
+  }
+  std::string raw = TrimCopy(value);
+  if (raw.empty()) {
+    return cycles;
+  }
+  std::string::size_type start = 0;
+  while (start < raw.size()) {
+    std::string::size_type comma = raw.find(',', start);
+    std::string token = raw.substr(start,
+                                   (comma == std::string::npos) ? std::string::npos
+                                                                : comma - start);
+    token = TrimCopy(token);
+    if (!token.empty()) {
+      char* end = NULL;
+      long parsed = strtol(token.c_str(), &end, 10);
+      if (end != token.c_str() && *end == '\0' && parsed > 0 &&
+          parsed <= std::numeric_limits<Index_t>::max()) {
+        cycles.insert(static_cast<Index_t>(parsed));
+      }
+    }
+    if (comma == std::string::npos) {
+      break;
+    }
+    start = comma + 1;
+  }
+  return cycles;
+}
+
 static std::set<std::string> ParseFields()
 {
   std::set<std::string> fields;
@@ -299,8 +338,11 @@ static const LogConfig& GetLogConfig()
   if (!initialized) {
     cfg.enabled = EnvEnabled("LULESH_LOG_ENABLE");
     cfg.log_pre = EnvEnabled("LULESH_LOG_PRE");
+    cfg.log_substeps = EnvEnabled("LULESH_LOG_SUBSTEPS");
     cfg.max_cycle = ParseMaxCycle("LULESH_LOG_CYCLES");
+    cfg.cycle_stride = ParseStride("LULESH_LOG_CYCLE_STRIDE");
     cfg.stride = ParseStride("LULESH_LOG_STRIDE");
+    cfg.cycle_list = ParseCycleList("LULESH_LOG_CYCLE_LIST");
     cfg.fields = ParseFields();
     const char* root = getenv("LULESH_LOG_ROOT");
     if (root != NULL && root[0] != '\0') {
@@ -321,7 +363,23 @@ static bool ShouldLogField(const LogConfig& cfg, const std::string& name)
 
 static bool ShouldLogStep(const LogConfig& cfg, Domain& domain)
 {
-  return cfg.enabled && domain.cycle() >= 1 && domain.cycle() <= cfg.max_cycle;
+  if (!cfg.enabled) {
+    return false;
+  }
+  Index_t cycle = domain.cycle();
+  if (cycle < 1) {
+    return false;
+  }
+  if (!cfg.cycle_list.empty()) {
+    return cfg.cycle_list.find(cycle) != cfg.cycle_list.end();
+  }
+  if (cycle > cfg.max_cycle) {
+    return false;
+  }
+  if (cfg.cycle_stride <= 1) {
+    return true;
+  }
+  return ((cycle - 1) % cfg.cycle_stride) == 0;
 }
 
 static std::string StepNameWithCycle(const std::string& base, Index_t cycle)
@@ -431,9 +489,25 @@ static void WriteInfoFile(const LogConfig& cfg,
   out << "log_root: " << cfg.root << "\n";
   out << "log_stride: " << cfg.stride << "\n";
   out << "log_cycles: " << cfg.max_cycle << "\n";
+  out << "log_cycle_stride: " << cfg.cycle_stride << "\n";
   out << "log_enabled: " << (cfg.enabled ? "true" : "false") << "\n";
   out << "log_pre: " << (cfg.log_pre ? "true" : "false") << "\n";
+  out << "log_substeps: " << (cfg.log_substeps ? "true" : "false") << "\n";
   out << "cycle: " << domain.cycle() << "\n";
+
+  if (!cfg.cycle_list.empty()) {
+    std::ostringstream joined;
+    std::set<Index_t>::const_iterator it = cfg.cycle_list.begin();
+    for (; it != cfg.cycle_list.end(); ++it) {
+      if (it != cfg.cycle_list.begin()) {
+        joined << ",";
+      }
+      joined << *it;
+    }
+    out << "log_cycle_list: " << joined.str() << "\n";
+  } else {
+    out << "log_cycle_list: none\n";
+  }
 
   if (!cfg.fields.empty()) {
     std::ostringstream joined;
@@ -623,6 +697,63 @@ static void LogElementFields(const LogConfig& cfg,
     WriteCsvFromDevice(JoinCsvPath(matrix_dir, "elemMass"),
                        &domain.m_elemMass[0], d_elemMass, count, stride);
   }
+}
+
+static void LogHourglassArrays(const LogConfig& cfg,
+                               Domain& domain,
+                               const std::string& step_name,
+                               const Real_t* d_dvdx,
+                               const Real_t* d_dvdy,
+                               const Real_t* d_dvdz,
+                               const Real_t* d_x8n,
+                               const Real_t* d_y8n,
+                               const Real_t* d_z8n,
+                               Index_t count)
+{
+  bool any = ShouldLogField(cfg, "dvdx") || ShouldLogField(cfg, "dvdy") ||
+             ShouldLogField(cfg, "dvdz") || ShouldLogField(cfg, "x8n") ||
+             ShouldLogField(cfg, "y8n") || ShouldLogField(cfg, "z8n");
+  if (!any) {
+    return;
+  }
+
+  std::string step_dir = lulesh_log::MakeStepDir(cfg.root, step_name, g_myRank);
+  std::string matrix_dir = lulesh_log::MakeMatrixDir(step_dir);
+  std::string info_dir = lulesh_log::MakeInfoDir(step_dir);
+  WriteInfoFile(cfg, domain, step_name, info_dir);
+
+  Real_t* host = static_cast<Real_t*>(malloc(sizeof(Real_t) *
+                                             static_cast<std::size_t>(count)));
+  if (host == NULL) {
+    return;
+  }
+
+  if (ShouldLogField(cfg, "dvdx")) {
+    WriteCsvFromDevice(JoinCsvPath(matrix_dir, "dvdx"),
+                       host, d_dvdx, count, cfg.stride);
+  }
+  if (ShouldLogField(cfg, "dvdy")) {
+    WriteCsvFromDevice(JoinCsvPath(matrix_dir, "dvdy"),
+                       host, d_dvdy, count, cfg.stride);
+  }
+  if (ShouldLogField(cfg, "dvdz")) {
+    WriteCsvFromDevice(JoinCsvPath(matrix_dir, "dvdz"),
+                       host, d_dvdz, count, cfg.stride);
+  }
+  if (ShouldLogField(cfg, "x8n")) {
+    WriteCsvFromDevice(JoinCsvPath(matrix_dir, "x8n"),
+                       host, d_x8n, count, cfg.stride);
+  }
+  if (ShouldLogField(cfg, "y8n")) {
+    WriteCsvFromDevice(JoinCsvPath(matrix_dir, "y8n"),
+                       host, d_y8n, count, cfg.stride);
+  }
+  if (ShouldLogField(cfg, "z8n")) {
+    WriteCsvFromDevice(JoinCsvPath(matrix_dir, "z8n"),
+                       host, d_z8n, count, cfg.stride);
+  }
+
+  free(host);
 }
 
 static void LogTimeConstraintFields(const LogConfig& cfg,
@@ -1264,9 +1395,9 @@ __global__ void acc_final_force (
     fy_tmp += fy_elem[elem] ;
     fz_tmp += fz_elem[elem] ;
   }
-  fx[gnode] = fx_tmp ;
-  fy[gnode] = fy_tmp ;
-  fz[gnode] = fz_tmp ;
+  fx[gnode] += fx_tmp ;
+  fy[gnode] += fy_tmp ;
+  fz[gnode] += fz_tmp ;
 }
 
 __global__ void hgc (
@@ -3171,6 +3302,16 @@ int main(int argc, char *argv[])
       }
     }
 
+    if (do_log && log_cfg.log_substeps) {
+      LogNodalFields(log_cfg, domain,
+                     StepNameWithCycle("step1a1_post_integrate_stress", log_cycle),
+                     d_x, d_y, d_z,
+                     d_xd, d_yd, d_zd,
+                     d_xdd, d_ydd, d_zdd,
+                     d_fx, d_fy, d_fz,
+                     d_nodalMass);
+    }
+
     //=================================================================================
     // CalcHourglassControlForElems(device_queue, domain, determ, hgcoef) ;  
     //=================================================================================
@@ -3234,6 +3375,15 @@ int main(int argc, char *argv[])
       exit(VolumeError);
     }
 
+    if (do_log && log_cfg.log_substeps) {
+      LogHourglassArrays(log_cfg, domain,
+                         StepNameWithCycle("step1a1a_hourglass_inputs",
+                                           log_cycle),
+                         d_dvdx, d_dvdy, d_dvdz,
+                         d_x8n, d_y8n, d_z8n,
+                         numElem8);
+    }
+
     if ( hgcoef > Real_t(0.) ) {
 
       //Index_t *nodeElemStart = &domain.m_nodeElemStart[0];
@@ -3291,6 +3441,16 @@ int main(int argc, char *argv[])
 #endif 
     } // if ( hgcoef > Real_t(0.) ) 
 
+    if (do_log && log_cfg.log_substeps) {
+      LogNodalFields(log_cfg, domain,
+                     StepNameWithCycle("step1a_post_force", log_cycle),
+                     d_x, d_y, d_z,
+                     d_xd, d_yd, d_zd,
+                     d_xdd, d_ydd, d_zdd,
+                     d_fx, d_fy, d_fz,
+                     d_nodalMass);
+    }
+
     //===========================================================================
     //CalcAccelerationForNodes(domain, domain.numNode());   // IN: fx  OUT: m_xdd
     //===========================================================================
@@ -3304,6 +3464,15 @@ int main(int argc, char *argv[])
         d_ydd,
         d_zdd,
         numNode);
+    if (do_log && log_cfg.log_substeps) {
+      LogNodalFields(log_cfg, domain,
+                     StepNameWithCycle("step1b_post_accel", log_cycle),
+                     d_x, d_y, d_z,
+                     d_xd, d_yd, d_zd,
+                     d_xdd, d_ydd, d_zdd,
+                     d_fx, d_fy, d_fz,
+                     d_nodalMass);
+    }
 
     //======================================================================================
     //ApplyAccelerationBoundaryConditionsForNodes(domain); // uses m_xdd
@@ -3326,6 +3495,15 @@ int main(int argc, char *argv[])
         s2,
         s3,
         numNodeBC ) ;
+    if (do_log && log_cfg.log_substeps) {
+      LogNodalFields(log_cfg, domain,
+                     StepNameWithCycle("step1c_post_accel_bc", log_cycle),
+                     d_x, d_y, d_z,
+                     d_xd, d_yd, d_zd,
+                     d_xdd, d_ydd, d_zdd,
+                     d_fx, d_fy, d_fz,
+                     d_nodalMass);
+    }
 
     //=================================================================
     // CalcVelocityForNodes( domain, delt, u_cut, domain.numNode()) ; //uses m_xd and m_xdd
@@ -3340,6 +3518,15 @@ int main(int argc, char *argv[])
         deltaTime,
         u_cut,
         numNode );
+    if (do_log && log_cfg.log_substeps) {
+      LogNodalFields(log_cfg, domain,
+                     StepNameWithCycle("step1d_post_velocity", log_cycle),
+                     d_x, d_y, d_z,
+                     d_xd, d_yd, d_zd,
+                     d_xdd, d_ydd, d_zdd,
+                     d_fx, d_fy, d_fz,
+                     d_nodalMass);
+    }
 
     //=================================================================================
     // CalcPositionForNodes( domain, delt, domain.numNode() );  //uses m_xd and m_x 
@@ -3353,6 +3540,15 @@ int main(int argc, char *argv[])
         d_zd,
         deltaTime,
         numNode) ;
+    if (do_log && log_cfg.log_substeps) {
+      LogNodalFields(log_cfg, domain,
+                     StepNameWithCycle("step1e_post_position", log_cycle),
+                     d_x, d_y, d_z,
+                     d_xd, d_yd, d_zd,
+                     d_xdd, d_ydd, d_zdd,
+                     d_fx, d_fy, d_fz,
+                     d_nodalMass);
+    }
 
     if (do_log) {
       LogNodalFields(log_cfg, domain,
