@@ -193,6 +193,7 @@ static bool g_cmdline_opts_set = false;
 struct LogConfig {
   bool enabled;
   bool log_pre;
+  Index_t max_cycle;
   Index_t stride;
   std::string root;
   std::set<std::string> fields;
@@ -200,6 +201,7 @@ struct LogConfig {
   LogConfig()
       : enabled(false),
         log_pre(false),
+        max_cycle(1),
         stride(1),
         root(lulesh_log::DefaultLogRoot())
   {
@@ -216,6 +218,23 @@ static bool EnvEnabled(const char* name)
 }
 
 static Index_t ParseStride(const char* name)
+{
+  const char* value = getenv(name);
+  if (value == NULL || value[0] == '\0') {
+    return 1;
+  }
+  char* end = NULL;
+  long parsed = strtol(value, &end, 10);
+  if (end == value || parsed <= 0) {
+    return 1;
+  }
+  if (parsed > std::numeric_limits<Index_t>::max()) {
+    return 1;
+  }
+  return static_cast<Index_t>(parsed);
+}
+
+static Index_t ParseMaxCycle(const char* name)
 {
   const char* value = getenv(name);
   if (value == NULL || value[0] == '\0') {
@@ -280,6 +299,7 @@ static const LogConfig& GetLogConfig()
   if (!initialized) {
     cfg.enabled = EnvEnabled("LULESH_LOG_ENABLE");
     cfg.log_pre = EnvEnabled("LULESH_LOG_PRE");
+    cfg.max_cycle = ParseMaxCycle("LULESH_LOG_CYCLES");
     cfg.stride = ParseStride("LULESH_LOG_STRIDE");
     cfg.fields = ParseFields();
     const char* root = getenv("LULESH_LOG_ROOT");
@@ -301,7 +321,14 @@ static bool ShouldLogField(const LogConfig& cfg, const std::string& name)
 
 static bool ShouldLogStep(const LogConfig& cfg, Domain& domain)
 {
-  return cfg.enabled && domain.cycle() == 1;
+  return cfg.enabled && domain.cycle() >= 1 && domain.cycle() <= cfg.max_cycle;
+}
+
+static std::string StepNameWithCycle(const std::string& base, Index_t cycle)
+{
+  std::ostringstream name;
+  name << base << "_cycle" << cycle;
+  return name.str();
 }
 
 static std::string JoinCsvPath(const std::string& dir, const std::string& name)
@@ -403,8 +430,10 @@ static void WriteInfoFile(const LogConfig& cfg,
   out << "build_flags_env: " << GetEnvString("LULESH_BUILD_FLAGS") << "\n";
   out << "log_root: " << cfg.root << "\n";
   out << "log_stride: " << cfg.stride << "\n";
+  out << "log_cycles: " << cfg.max_cycle << "\n";
   out << "log_enabled: " << (cfg.enabled ? "true" : "false") << "\n";
   out << "log_pre: " << (cfg.log_pre ? "true" : "false") << "\n";
+  out << "cycle: " << domain.cycle() << "\n";
 
   if (!cfg.fields.empty()) {
     std::ostringstream joined;
@@ -3060,9 +3089,11 @@ int main(int argc, char *argv[])
 
     const LogConfig& log_cfg = GetLogConfig();
     const bool do_log = ShouldLogStep(log_cfg, *locDom);
+    const Index_t log_cycle = locDom->cycle();
 
     if (do_log && log_cfg.log_pre) {
-      LogNodalFields(log_cfg, *locDom, "step0_pre_lagrange_nodal",
+      LogNodalFields(log_cfg, *locDom,
+                     StepNameWithCycle("step0_pre_lagrange_nodal", log_cycle),
                      d_x, d_y, d_z,
                      d_xd, d_yd, d_zd,
                      d_xdd, d_ydd, d_zdd,
@@ -3324,7 +3355,8 @@ int main(int argc, char *argv[])
         numNode) ;
 
     if (do_log) {
-      LogNodalFields(log_cfg, domain, "step1_post_lagrange_nodal",
+      LogNodalFields(log_cfg, domain,
+                     StepNameWithCycle("step1_post_lagrange_nodal", log_cycle),
                      d_x, d_y, d_z,
                      d_xd, d_yd, d_zd,
                      d_xdd, d_ydd, d_zdd,
@@ -3558,7 +3590,9 @@ int main(int argc, char *argv[])
 #endif
 
     if (do_log) {
-      LogElementFields(log_cfg, domain, "step2_post_lagrange_elements",
+      LogElementFields(log_cfg, domain,
+                       StepNameWithCycle("step2_post_lagrange_elements",
+                                         log_cycle),
                        d_e, d_p, d_q, d_ql, d_qq,
                        d_v, d_vnew, d_volo, d_delv, d_vdov,
                        d_arealg, d_ss, d_elemMass);
@@ -3568,7 +3602,8 @@ int main(int argc, char *argv[])
 
     if (do_log) {
       LogTimeConstraintFields(log_cfg, domain,
-                              "step3_post_time_constraints");
+                              StepNameWithCycle("step3_post_time_constraints",
+                                                log_cycle));
     }
 
     if ((opts.showProg != 0) && (opts.quiet == 0) && (myRank == 0)) {
