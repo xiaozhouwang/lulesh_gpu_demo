@@ -756,6 +756,48 @@ static void LogHourglassArrays(const LogConfig& cfg,
   free(host);
 }
 
+static void LogHourglassForces(const LogConfig& cfg,
+                               Domain& domain,
+                               const std::string& step_name,
+                               const Real_t* d_hgfx,
+                               const Real_t* d_hgfy,
+                               const Real_t* d_hgfz,
+                               Index_t count)
+{
+  bool any = ShouldLogField(cfg, "hgfx") ||
+             ShouldLogField(cfg, "hgfy") ||
+             ShouldLogField(cfg, "hgfz");
+  if (!any) {
+    return;
+  }
+
+  std::string step_dir = lulesh_log::MakeStepDir(cfg.root, step_name, g_myRank);
+  std::string matrix_dir = lulesh_log::MakeMatrixDir(step_dir);
+  std::string info_dir = lulesh_log::MakeInfoDir(step_dir);
+  WriteInfoFile(cfg, domain, step_name, info_dir);
+
+  Real_t* host = static_cast<Real_t*>(malloc(sizeof(Real_t) *
+                                             static_cast<std::size_t>(count)));
+  if (host == NULL) {
+    return;
+  }
+
+  if (ShouldLogField(cfg, "hgfx")) {
+    WriteCsvFromDevice(JoinCsvPath(matrix_dir, "hgfx"),
+                       host, d_hgfx, count, cfg.stride);
+  }
+  if (ShouldLogField(cfg, "hgfy")) {
+    WriteCsvFromDevice(JoinCsvPath(matrix_dir, "hgfy"),
+                       host, d_hgfy, count, cfg.stride);
+  }
+  if (ShouldLogField(cfg, "hgfz")) {
+    WriteCsvFromDevice(JoinCsvPath(matrix_dir, "hgfz"),
+                       host, d_hgfz, count, cfg.stride);
+  }
+
+  free(host);
+}
+
 static void LogTimeConstraintFields(const LogConfig& cfg,
                                     Domain& domain,
                                     const std::string& step_name)
@@ -1395,9 +1437,9 @@ __global__ void acc_final_force (
     fy_tmp += fy_elem[elem] ;
     fz_tmp += fz_elem[elem] ;
   }
-  fx[gnode] += fx_tmp ;
-  fy[gnode] += fy_tmp ;
-  fz[gnode] += fz_tmp ;
+  fx[gnode] = fx_tmp ;
+  fy[gnode] = fy_tmp ;
+  fz[gnode] = fz_tmp ;
 }
 
 __global__ void hgc (
@@ -1720,9 +1762,9 @@ __global__ void collect_final_force (
     fy_tmp += fy_elem[elem] ;
     fz_tmp += fz_elem[elem] ;
   }
-  fx[gnode] = fx_tmp ;
-  fy[gnode] = fy_tmp ;
-  fz[gnode] = fz_tmp ;
+  fx[gnode] += fx_tmp ;
+  fy[gnode] += fy_tmp ;
+  fz[gnode] += fz_tmp ;
 }
 
 __global__  void accelerationForNode (
@@ -3411,6 +3453,13 @@ int main(int argc, char *argv[])
           d_fz_elem,
           hgcoef,
           numElem );
+
+      if (do_log && log_cfg.log_substeps) {
+        LogHourglassForces(log_cfg, domain,
+                           StepNameWithCycle("step1a1b_hourglass_forces",
+                                             log_cycle),
+                           d_fx_elem, d_fy_elem, d_fz_elem, numElem8);
+      }
 
       collect_final_force <<<gws_node, lws>>>  (
           d_fx_elem,
