@@ -3571,10 +3571,10 @@ int main(int argc, char *argv[])
                               "step3_post_time_constraints");
     }
 
-    //if ((opts.showProg != 0) && (opts.quiet == 0) && (myRank == 0)) {
+    if ((opts.showProg != 0) && (opts.quiet == 0) && (myRank == 0)) {
       printf("cycle = %d, time = %e, dt=%e\n",
           locDom->cycle(), double(locDom->time()), double(locDom->deltatime()) ) ;
-    //}
+    }
     if (opts.iteration_cap == 1){
       break;
     }
