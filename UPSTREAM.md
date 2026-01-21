@@ -3,6 +3,7 @@
 This repository vendors two GPU implementations as git subtrees for a
 self-contained history. The subtrees live under `lulesh-gpu/` and
 `lulesh-gpu-opt/`.
+Commit IDs below refer to the subtree history recorded in this repo.
 
 ## Upstream Sources
 
@@ -26,4 +27,3 @@ Correctness fix detail:
 - `4287a3c` swaps accumulation behavior between `acc_final_force` and
   `collect_final_force` in `lulesh-gpu-opt/lulesh-cuda/lulesh.cu`, and adds
   hourglass-force logging for validation.
-
