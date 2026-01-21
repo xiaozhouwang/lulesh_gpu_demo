@@ -3,6 +3,11 @@
 This repo now includes a CUDA GPU port, logging hooks for CPU/GPU validation,
 and benchmark utilities for speedup and correctness plots.
 
+## Upstream and provenance
+
+GPU implementations under `lulesh-gpu/` and `lulesh-gpu-opt/` are imported
+as git subtrees. See `UPSTREAM.md` for upstream sources and local fixes.
+
 **Highlights**
 - GPU port lives under `lulesh-gpu-opt/lulesh-cuda` and builds `lulesh_gpu`.
 - Logging and comparison tooling lives under `benchmarks/`.
