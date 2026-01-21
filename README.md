@@ -3,10 +3,27 @@
 This repo now includes a CUDA GPU port, logging hooks for CPU/GPU validation,
 and benchmark utilities for speedup and correctness plots.
 
+Chinese version: [README_zh.md](README_zh.md)
+
 ## Upstream and provenance
 
 GPU implementations under `lulesh-gpu/` and `lulesh-gpu-opt/` are imported
 as git subtrees. See `UPSTREAM.md` for upstream sources and local fixes.
+
+## Added GPU changes (and why)
+
+The CUDA implementation under `lulesh-gpu-opt/` includes a small set of local
+additions on top of upstream (see `UPSTREAM.md`):
+
+- Added GPU logging hooks and configurable log scopes so CPU/GPU results can be
+  compared deterministically for correctness.
+- Added multi-cycle and substep logging options to diagnose drift across time
+  steps and isolate discrepancies.
+- Honored the progress flag for cycle output to keep benchmark logs clean and
+  reproducible.
+- Fixed force accumulation ordering in
+  `lulesh-gpu-opt/lulesh-cuda/lulesh.cu` and added hourglass-force logging to
+  validate the fix against CPU reference results.
 
 **Highlights**
 - GPU port lives under `lulesh-gpu-opt/lulesh-cuda` and builds `lulesh_gpu`.
